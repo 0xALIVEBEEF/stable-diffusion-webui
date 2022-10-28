@@ -7,13 +7,17 @@ import inspect
 import k_diffusion.sampling
 import ldm.models.diffusion.ddim
 import ldm.models.diffusion.plms
-from modules import prompt_parser, devices, processing, images
+from modules import prompt_parser, devices, processing
 
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
+import modules.safety as safety
 
 
 SamplerData = namedtuple('SamplerData', ['name', 'constructor', 'aliases', 'options'])
+
+last_latent=None #could go in state.last_latent, but I'm lazy. This stores the previous latent array for comparison to the current
+#to implement:last_converegence_error and display convergence progress
 
 samplers_k_diffusion = [
     ('Euler a', 'sample_euler_ancestral', ['k_euler_a'], {}),
@@ -71,7 +75,6 @@ sampler_extra_params = {
     'sample_dpm_2': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
 }
 
-
 def setup_img2img_steps(p, steps=None):
     if opts.img2img_fix_steps or steps is not None:
         steps = int((steps or p.steps) / min(p.denoising_strength, 0.999)) if p.denoising_strength > 0 else 0
@@ -83,28 +86,65 @@ def setup_img2img_steps(p, steps=None):
     return steps, t_enc
 
 
-def single_sample_to_image(sample):
-    x_sample = processing.decode_first_stage(shared.sd_model, sample.unsqueeze(0))[0]
+def sample_to_image(samples):
+    x_sample = processing.decode_first_stage(shared.sd_model, samples[0:1])[0]
     x_sample = torch.clamp((x_sample + 1.0) / 2.0, min=0.0, max=1.0)
+    #if opts.filter_nsfw:
+    #    x_sample = safety.censor_batch(x_sample)
     x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
     x_sample = x_sample.astype(np.uint8)
     return Image.fromarray(x_sample)
 
+def compare_latents(latent1, latent2): #janky way to compare numpy arrays and output similarity value. Used for run until convergence operation
+    if (latent1==None or latent2==None): #if this happens, it's probably in the first stage
+        return 1
+    latent1 = latent_to_aprox_image(latent1)
+    latent2 = latent_to_aprox_image(latent2)
+    #calc precentage difference
+    error = np.mean((latent1) != (latent2))
+    #print(error)
+    return error
 
-def sample_to_image(samples):
-    return single_sample_to_image(samples[0])
-
-
-def samples_to_image_grid(samples):
-    return images.image_grid([single_sample_to_image(sample) for sample in samples])
-
-
+def latent_to_aprox_image(latent_in):
+    #this code is mainly from a hugging face discussion on how to get low resolution approximated preview images out of the latentent tensors
+    v1_4_latent_rgb_factors = torch.tensor([
+        
+        [0.298, 0.207, 0.208],
+        [0.187, 0.286, 0.173],
+        [-0.158, 0.189, 0.264],
+        [-0.184, -0.271, -0.473],
+    ], dtype=latent_in.dtype, device=latent_in.device) #should work with 1.5 right?
+    
+    latent_image = latent_in[0].permute(1,2,0) @ v1_4_latent_rgb_factors #marix multiplication math magic
+    
+    latents_ubyte = (((latent_image+1)/2)
+                     .clamp(0,1)
+                     .mul(0xFF)
+                     .byte()).cpu() #convert it to 8 bit values (which also effectively rounds the values, which helps with getting the convergence difference close to what it should be where every little difference in the latent space makes the comparator spit out True)
+    return latents_ubyte.numpy()
+    
 def store_latent(decoded):
+    global last_latent
     state.current_latent = decoded
-
+    #every step, the diffusion model will store the latent space array in state.current_latent
+    if opts.go_to_convergence: #convergence code
+        #OK. I'm going to explain my confusing variable names.
+        #reduced_convergence_tolerance is the reduced tolerance. If it doesn't have a percent error of 0 (fully converged), it will raise (confusing. I know.) the percent error that it needs to be at for the program to halt and output the fully converged image 
+        #reduce_convergence_tolerance_step is the step value to reduce the convergence tolerance so it doesn't go on forever
+        convergence_tolerance = (opts.default_convergence_tolerance/100)
+        latents_difference = compare_latents(decoded, last_latent) #there's a bug where as the end steps approach this value gets higher and higher. I don't know why
+        shared.state.converge_prog=latents_difference #set convergence progress value
+        #maybe add something so that it has to see the convergence value the same for a few steps before it decides it's converged
+        if shared.state.sampling_step >= opts.reduce_convergence_tolerance_step:
+            convergence_tolerance = (opts.reduced_convergence_tolerance/100)
+        if latents_difference <= convergence_tolerance: #if the comparison outputs 1% difference or less, stop
+            print("image has reached near convergence. Halting")
+            state.skipped=True #hopefully this doesn't cause problems
+            state.converge_prog=1 #reset so that if operating in batch mode, next image does not "converge" instantly. May not be needed
     if opts.show_progress_every_n_steps > 0 and shared.state.sampling_step % opts.show_progress_every_n_steps == 0:
         if not shared.parallel_processing_allowed:
             shared.state.current_image = sample_to_image(decoded)
+    last_latent=decoded
 
 
 class InterruptedException(BaseException):
@@ -228,7 +268,7 @@ class VanillaStableDiffusionSampler:
             unconditional_conditioning = {"c_concat": [image_conditioning], "c_crossattn": [unconditional_conditioning]}
             
             
-        samples = self.launch_sampling(t_enc + 1, lambda: self.sampler.decode(x1, conditioning, t_enc, unconditional_guidance_scale=p.cfg_scale, unconditional_conditioning=unconditional_conditioning))
+        samples = self.launch_sampling(steps, lambda: self.sampler.decode(x1, conditioning, t_enc, unconditional_guidance_scale=p.cfg_scale, unconditional_conditioning=unconditional_conditioning))
 
         return samples
 
@@ -429,7 +469,7 @@ class KDiffusionSampler:
         self.model_wrap_cfg.init_latent = x
         self.last_latent = x
 
-        samples = self.launch_sampling(t_enc + 1, lambda: self.func(self.model_wrap_cfg, xi, extra_args={
+        samples = self.launch_sampling(steps, lambda: self.func(self.model_wrap_cfg, xi, extra_args={
             'cond': conditioning, 
             'image_cond': image_conditioning, 
             'uncond': unconditional_conditioning, 
@@ -468,4 +508,3 @@ class KDiffusionSampler:
         }, disable=False, callback=self.callback_state, **extra_params_kwargs))
 
         return samples
-
