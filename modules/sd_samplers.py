@@ -99,12 +99,56 @@ def samples_to_image_grid(samples):
     return images.image_grid([single_sample_to_image(sample) for sample in samples])
 
 
-def store_latent(decoded):
-    state.current_latent = decoded
+def compare_latents(latent1, latent2): 
+    if (latent1==None or latent2==None): #if this happens, it's probably in the first stage
+        return 1
+    latent1 = latent_to_aprox_image(latent1)
+    latent2 = latent_to_aprox_image(latent2)
+    #calc precentage difference
+    error = np.mean((latent1) != (latent2))
+    #print(error) #for debug
+    return error
 
+def latent_to_aprox_image(latent_in):
+    #this code is mainly from a hugging face discussion on how to get low resolution approximated preview images out of the latentent tensors
+    v1_4_latent_rgb_factors = torch.tensor([
+        
+        [0.298, 0.207, 0.208],
+        [0.187, 0.286, 0.173],
+        [-0.158, 0.189, 0.264],
+        [-0.184, -0.271, -0.473],
+    ], dtype=latent_in.dtype, device=latent_in.device) #should work with 1.5 right?
+    
+    latent_image = latent_in[0].permute(1,2,0) @ v1_4_latent_rgb_factors #marix multiplication math magic
+    
+    latents_ubyte = (((latent_image+1)/2)
+                     .clamp(0,1)
+                     .mul(0xFF)
+                     .byte()).cpu() #convert it to 8 bit values (which also effectively rounds the values, which helps with getting the convergence difference close to what it should be where every little difference in the latent space makes the comparator spit out True)
+    return latents_ubyte.numpy()
+
+
+def store_latent(decoded):
+    if opts.go_to_convergence: #convergence code
+        #OK. I'm going to explain my confusing variable names.
+        #reduced_convergence_tolerance is the reduced tolerance. If it doesn't have a percent error of 0 (fully converged), it will raise (confusing. I know.) the percent error that it needs to be at for the program to halt and output the fully converged image 
+        #reduce_convergence_tolerance_step is the step value to reduce the convergence tolerance so it doesn't go on forever
+        convergence_tolerance = (opts.default_convergence_tolerance/100)
+        latents_difference = compare_latents(decoded, state.current_latent) #there's a bug where as the end steps approach this value gets higher and higher. I don't know why.
+        #I used state.current_latent as the previous latent here
+        shared.state.converge_prog=latents_difference #set convergence progress value
+        #maybe add something so that it has to see the convergence value the same for a few steps before it decides it's converged
+        if shared.state.sampling_step >= opts.reduce_convergence_tolerance_step:
+            convergence_tolerance = (opts.reduced_convergence_tolerance/100)
+        if latents_difference <= convergence_tolerance: #if the comparison outputs 1% difference or less, stop
+            print("image has reached near convergence. Halting")
+            state.skipped=True
+            state.converge_prog=1 #reset so that if operating in batch mode, next image does not "converge" instantly. May not be needed
     if opts.show_progress_every_n_steps > 0 and shared.state.sampling_step % opts.show_progress_every_n_steps == 0:
         if not shared.parallel_processing_allowed:
             shared.state.current_image = sample_to_image(decoded)
+    state.current_latent = decoded
+    last_latent=decoded
 
 
 class InterruptedException(BaseException):
