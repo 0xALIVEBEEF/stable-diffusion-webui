@@ -116,6 +116,10 @@ class StableDiffusionProcessing():
         self.s_tmax = s_tmax or float('inf')  # not representable as a standard ui option
         self.s_noise = s_noise or opts.s_noise
         self.override_settings = {k: v for k, v in (override_settings or {}).items() if k not in shared.restricted_opts}
+        self.go_to_convergence = opts.go_to_convergence
+        self.default_convergence_tolerance = opts.default_convergence_tolerance
+        self.reduce_convergence_tolerance_step = opts.reduce_convergence_tolerance_step
+        self.reduced_convergence_tolerance = opts.reduced_convergence_tolerance
 
         if not seed_enable_extras:
             self.subseed = -1
@@ -163,6 +167,10 @@ class Processed:
         self.styles = p.styles
         self.job_timestamp = state.job_timestamp
         self.clip_skip = opts.CLIP_stop_at_last_layers
+        self.go_to_convergence = p.go_to_convergence
+        self.default_convergence_tolerance = p.default_convergence_tolerance
+        self.reduce_convergence_tolerance_step = p.reduce_convergence_tolerance_step
+        self.reduced_convergence_tolerance = p.reduced_convergence_tolerance
 
         self.eta = p.eta
         self.ddim_discretize = p.ddim_discretize
@@ -209,7 +217,7 @@ class Processed:
             "infotexts": self.infotexts,
             "styles": self.styles,
             "job_timestamp": self.job_timestamp,
-            "clip_skip": self.clip_skip,
+            "clip_skip": self.clip_skip
         }
 
         return json.dumps(obj)
