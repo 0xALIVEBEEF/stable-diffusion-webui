@@ -304,11 +304,18 @@ def check_progress_call(id_part):
         shared.state.time_left_force_display = True
 
     progress = min(progress, 1)
+    convergence_goal = (opts.default_convergence_tolerance/100)
+    if shared.state.sampling_step >= opts.reduce_convergence_tolerance_step:
+        convergence_goal = (opts.reduced_convergence_tolerance/100)
+    convergence_progress = (1-shared.state.converge_prog)/(1-convergence_goal)
+
 
     progressbar = ""
-    if opts.show_progressbar:
-        progressbar = f"""<div class='progressDiv'><div class='progress' style="overflow:visible;width:{progress * 100}%;white-space:nowrap;">{"&nbsp;" * 2 + str(int(progress*100))+"%" + time_left if progress > 0.01 else ""}</div></div>"""
-
+    if not opts.go_to_convergence:
+            progressbar = f"""<div class='progressDiv'><div class='progress' style="overflow:visible;width:{progress * 100}%;white-space:nowrap;">{"&nbsp;" * 2 + str(int(progress*100))+"%" + time_left if progress > 0.01 else ""}</div></div>"""
+        else:
+            progressbar = f"""<div class='progressDiv'><div class='progress' style="overflow:visible;width:{convergence_progress * 100}%;white-space:nowrap;">{"&nbsp;" * 2 + "convergence progress:" + str(int(convergence_progress*100))+"%"}</div></div>"""
+    
     image = gr_show(False)
     preview_visibility = gr_show(False)
 
@@ -649,7 +656,9 @@ def create_ui(wrap_gradio_gpu_call):
             with gr.Column(variant='panel'):
                 steps = gr.Slider(minimum=1, maximum=150, step=1, label="Sampling Steps", value=20)
                 sampler_index = gr.Radio(label='Sampling method', elem_id="txt2img_sampling", choices=[x.name for x in samplers], value=samplers[0].name, type="index")
-
+                #go_to_convergence = gr.Checkbox(label='Continue until image has converged', value=False, interactive=True)
+                #reduce_convergence_tolerance_step = gr.Slider(label="Step at which to increase convergence tolerance", value=100, interactive=True, minimum=0, maximum=300, step=1)
+                #reduced_convergence_tolerance = gr.Slider(label="Value (%) to increase tolerance to after a certain step", value=2, interactive=True, minimum=0, maximum=100, step=1, ) #it throws an error when I try to put a float in here. It should be float
                 with gr.Group():
                     width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=512)
                     height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=512)
